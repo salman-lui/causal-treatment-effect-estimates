@@ -1,0 +1,189 @@
+---
+title: "final"
+output: html_document
+date: "2022-11-12"
+---
+
+```{r}
+library(lme4)
+library(readr)
+library(tidyverse)
+library(rstanarm)
+library(fpc)
+library(arm)
+```
+
+```{r}
+classroom <- read_csv("classroom.csv")
+```
+
+```{r}
+# clean data
+classroom <- classroom %>%
+               filter(!is.na(mathknow)) %>%
+               mutate(std.mathkind = (mathkind - mean(mathkind)) / sd(mathkind))
+```
+
+```{r}
+# find experimental and target sample split
+exp_target_split <- function(n_iters){
+  group_ids <- unique(classroom$classid)
+  l <- length(group_ids)
+  cutoff <- floor(l / 2)
+  
+  set.seed(42)
+  
+  best_dist <- 0.0
+  best_exp.df <- NA
+  best_target.df <- NA
+  for (i in 1:n_iters){
+    perm <- sample(group_ids, length(group_ids))
+    exp_groups <- perm[1:cutoff]
+    target_groups <- perm[cutoff+1:length(perm)]
+    
+    exp.df <- classroom %>% filter(classid %in% exp_groups)
+    target.df <- classroom %>% filter(classid %in% target_groups)
+    
+    mu.exp <- colMeans(exp.df)[c("yearstea", "mathknow", "housepov", "mathprep")]
+    mu.target <- colMeans(exp.df)[c("yearstea", "mathknow", "housepov", "mathprep")]
+    
+    cov.exp <- cov(exp.df[c("yearstea", "mathknow", "housepov", "mathprep")])
+    cov.target <- cov(target.df[c("yearstea", "mathknow", "housepov", "mathprep")])
+    
+    curr_dist <- as.vector(bhattacharyya.dist(mu.exp, mu.target, cov.exp, cov.target))
+    if (curr_dist > best_dist){
+      best_dist <- curr_dist
+      best_exp.df <- exp.df
+      best_target.df <- target.df
+    }
+  }
+  
+  exp.df$s <- 0
+  target.df$s <- 1
+  list("exp"=best_exp.df, "tgt"=best_target.df, "max_dist"=best_dist)
+}
+
+```
+
+```{r}
+split.obj <- exp_target_split(10000)
+exp.df <- split.obj$exp
+target.df <- split.obj$tgt
+classroom <- classroom %>%
+               mutate(s=ifelse(classid %in% exp.df$classid, 0, 1))
+```
+
+```{r}
+group_covs <- c("yearstea", "mathknow", "housepov", "mathprep")
+group_inter <- c("minority:yearstea", "minority:mathknow", "minority:housepov", "minority:mathprep")
+```
+
+```{r}
+# ignorable_no_interact_positive_fit
+
+simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
+  #fit model
+  if (ignorable){
+    if (interact){
+      full.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 + minority + minority:housepov| classid), data=classroom)
+    } else{
+      full.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 | classid), data=classroom)
+    }
+  } else{
+    if (interact) {
+      exp.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 + minority + minority:housepov| classid), data=exp.df)
+      target.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 + minority + minority:housepov| classid), data=target.df)
+    } else{
+      exp.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 | classid), data=exp.df)
+      target.fit <- lmer(mathgain ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep) +  (sex + minority + ses + std.mathkind):(yearstea + mathknow + housepov + mathprep) + (1 | classid), data=target.df)
+    }
+  }
+  
+  #sample selection fit
+  sample_select_fit <- lm(s ~ (. - schoolid - classid - childid - mathkind), data=classroom)
+  
+  #positive alignment
+  if (pos.alignment){
+    sample_select_order <- rank(-abs(coef(sample_select_fit)[group_covs]))
+  } else{
+    sample_select_order <- rank(abs(coef(sample_select_fit)[group_covs]))
+  }
+  
+  if (ignorable){
+    inter_coefs <- fixef(full.fit)[group_inter]
+    inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
+    
+    coef_should <- inter_coef_sorted[sample_select_order]
+    reshuffled_coef[group_inter] <- coef_should
+    
+    coef_name_range <- c(1:length(names(fixef(full.fit))))
+    names(coef_name_range) <- names(fixef(full.fit))
+    group_inter_ids <- as.vector(coef_name_range[group_inter])
+    
+    full.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+    
+  } else{
+    # align exp fit
+    inter_coefs <- fixef(exp.fit)[group_inter]
+    inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
+    
+    coef_should <- inter_coef_sorted[sample_select_order]
+    reshuffled_coef[group_inter] <- coef_should
+    
+    coef_name_range <- c(1:length(names(fixef(exp.fit))))
+    names(coef_name_range) <- names(fixef(exp.fit))
+    group_inter_ids <- as.vector(coef_name_range[group_inter])
+    
+    exp.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+    
+    #align target fit
+    inter_coefs <- fixef(target.fit)[group_inter]
+    inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
+    
+    coef_should <- inter_coef_sorted[sample_select_order]
+    reshuffled_coef[group_inter] <- coef_should
+    
+    coef_name_range <- c(1:length(names(fixef(target.fit))))
+    names(coef_name_range) <- names(fixef(target.fit))
+    group_inter_ids <- as.vector(coef_name_range[group_inter])
+    
+    target.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+  }
+  
+  # simulate new data
+  exp.df0 <- exp.df %>%
+              mutate(minority = 0)
+  exp.df1 <- exp.df %>%
+              mutate(minority = 1)
+  target.df0 <- target.df %>%
+                  mutate(minority = 0)
+  target.df1 <- target.df %>%
+                  mutate(minority = 1)
+  
+  if (ignorable){
+    exp.generating.fit <- full.fit
+    target.generating.fit <- full.fit
+  } else{
+    exp.generating.fit <- exp.fit
+    target.generating.fit <- target.fit
+  }
+
+  exp.df.sim <- exp.df %>%
+                  mutate(mathgain0=simulate(exp.generating.fit, nsim=1, newdata=exp.df0)$sim_1,
+                         mathgain1=simulate(exp.generating.fit, nsim=1, newdata=exp.df1)$sim_1,
+                         mathgain = ifelse(minority==0, mathgain0, mathgain1))
+  target.df.sim <- target.df %>%
+                mutate(mathgain0=simulate(target.generating.fit, nsim=1, newdata=target.df0)$sim_1,
+                       mathgain1=simulate(target.generating.fit, nsim=1, newdata=target.df1)$sim_1,
+                       mathgain = ifelse(minority==0, mathgain0, mathgain1))
+  
+  list("exp"=exp.df.sim, "tgt"=target.df.sim)
+}
+```
+
+```{r}
+for (i in 1:1000){
+  sim.obj <- simulate_data(ignorable=F, interact = F, pos.alignment = T)  
+}
+```
+
