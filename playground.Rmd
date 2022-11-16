@@ -70,7 +70,7 @@ split.obj <- exp_target_split(10000)
 exp.df <- split.obj$exp
 target.df <- split.obj$tgt
 classroom <- classroom %>%
-               mutate(s=ifelse(classid %in% exp.df$classid, 0, 1))
+             mutate(s=ifelse(classid %in% exp.df$classid, 0, 1))
 ```
 
 ```{r}
@@ -100,7 +100,7 @@ simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
   }
   
   #sample selection fit
-  sample_select_fit <- lm(s ~ (. - schoolid - classid - childid - mathkind), data=classroom)
+  sample_select_fit <- lm(s ~ (sex + minority + ses + std.mathkind + yearstea + mathknow + housepov + mathprep), data=classroom)
   
   #positive alignment
   if (pos.alignment){
@@ -114,13 +114,13 @@ simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
     inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
     
     coef_should <- inter_coef_sorted[sample_select_order]
-    reshuffled_coef[group_inter] <- coef_should
+    inter_coefs[group_inter] <- coef_should
     
     coef_name_range <- c(1:length(names(fixef(full.fit))))
     names(coef_name_range) <- names(fixef(full.fit))
     group_inter_ids <- as.vector(coef_name_range[group_inter])
     
-    full.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+    full.fit@beta[group_inter_ids] <- as.vector(inter_coefs[group_inter])
     
   } else{
     # align exp fit
@@ -128,26 +128,26 @@ simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
     inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
     
     coef_should <- inter_coef_sorted[sample_select_order]
-    reshuffled_coef[group_inter] <- coef_should
+    inter_coefs[group_inter] <- coef_should
     
     coef_name_range <- c(1:length(names(fixef(exp.fit))))
     names(coef_name_range) <- names(fixef(exp.fit))
     group_inter_ids <- as.vector(coef_name_range[group_inter])
     
-    exp.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+    exp.fit@beta[group_inter_ids] <- as.vector(inter_coefs[group_inter])
     
     #align target fit
     inter_coefs <- fixef(target.fit)[group_inter]
     inter_coef_sorted <- as.vector(inter_coefs)[order(as.vector(abs(inter_coefs)), decreasing=T)]
     
     coef_should <- inter_coef_sorted[sample_select_order]
-    reshuffled_coef[group_inter] <- coef_should
+    inter_coefs[group_inter] <- coef_should
     
     coef_name_range <- c(1:length(names(fixef(target.fit))))
     names(coef_name_range) <- names(fixef(target.fit))
     group_inter_ids <- as.vector(coef_name_range[group_inter])
     
-    target.fit@beta[group_inter_ids] <- as.vector(reshuffled_coef[group_inter])
+    target.fit@beta[group_inter_ids] <- as.vector(inter_coefs[group_inter])
   }
   
   # simulate new data
@@ -182,8 +182,8 @@ simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
 ```
 
 ```{r}
-for (i in 1:1000){
-  sim.obj <- simulate_data(ignorable=F, interact = F, pos.alignment = T)  
+for (i in 1:100){
+  sim.obj <- simulate_data(ignorable=T, interact = F, pos.alignment = T)  
 }
 ```
 
