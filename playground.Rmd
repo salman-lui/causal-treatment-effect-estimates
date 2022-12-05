@@ -11,6 +11,11 @@ library(tidyverse)
 library(rstanarm)
 library(fpc)
 library(arm)
+library(bartCause)
+library(reshape2)
+library(survey)
+library(randomForest)
+library(gbm)
 ```
 
 ```{r}
@@ -182,8 +187,188 @@ simulate_data <- function(ignorable=T, interact=F, pos.alignment=T){
 ```
 
 ```{r}
-for (i in 1:100){
-  sim.obj <- simulate_data(ignorable=T, interact = F, pos.alignment = T)  
+designs <- expand.grid(ignorable=c(T, F), interact=c(T, F), pos.alignment=c(T, F))
+design_names <- expand.grid(ignorable=c("T", "F"), interact=c("T", "F"), pos.alignment=c("T", "F"))
+```
+
+```{r}
+# linear regression
+set.seed(42)
+n_iters <- 1000
+std_biases <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
+names <- rep(NA, nrow(designs))
+for (i in 1:nrow(designs)){
+  names[i] <- paste(design_names[i,], collapse="")
+}
+colnames(std_biases) <- names
+
+for (k in 1:nrow(designs)){
+  des <- designs[k, ]
+  for (i in 1:n_iters){
+    sim.obj <- simulate_data(ignorable=des["ignorable"][1,], interact = des["interact"][1,], pos.alignment = des["pos.alignment"][1,])  
+    experiment <- sim.obj[["exp"]]
+    target <- sim.obj[["tgt"]]
+    
+    # final modification
+    experiment$target_select <- 0
+    target$target_select <- 1
+    experiment$final_y <- experiment$mathgain
+    target$final_y <- target$mathgain0
+    experiment$final_treat <- experiment$minority
+    target$final_treat <- 0
+    # combining both target and experiment data
+    final_df <- rbind(experiment, target)
+    
+    # compute SATE
+    sate <- mean(final_df$mathgain1 - final_df$mathgain0)
+    
+    # fit model
+    fit <- lm(final_y ~ . -schoolid - classid - mathgain0 - mathgain1 - mathkind - mathgain - minority - childid - target_select, data = final_df)
+    
+    tate_est <- coef(fit)["final_treat"]
+    std_bias <- (tate_est - sate) / sd(final_df$final_y)
+    std_biases[i, k] <- std_bias
+  }
+}
+```
+
+```{r}
+
+ggplot(melt(std_biases), aes(y=variable, x=value)) + 
+    geom_boxplot()
+```
+
+
+```{r}
+set.seed(42)
+n_iters <- 2
+std_biases_bart <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
+names <- rep(NA, nrow(designs))
+for (i in 1:nrow(designs)){
+  names[i] <- paste(design_names[i,], collapse="")
+}
+colnames(std_biases_bart) <- names
+
+for (k in 1:nrow(designs)){
+  des <- designs[k, ]
+  for (i in 1:n_iters){
+    sim.obj <- simulate_data(ignorable=des["ignorable"][1,], interact = des["interact"][1,], pos.alignment = des["pos.alignment"][1,])  
+    experiment <- sim.obj[["exp"]]
+    target <- sim.obj[["tgt"]]
+    
+    # final modification
+    experiment$target_select <- 0
+    target$target_select <- 1
+    experiment$final_y <- experiment$mathgain
+    target$final_y <- target$mathgain0
+    experiment$final_treat <- experiment$minority
+    target$final_treat <- 0
+    # combining both target and experiment data
+    final_df <- rbind(experiment, target)
+    
+    # compute SATE
+    sate <- mean(final_df$mathgain1 - final_df$mathgain0)
+    
+    # fit BART
+    confounder_bart <- final_df[,!names(final_df) %in% c("childid", "minority", "mathgain0", "mathgain1", "mathkind", "mathgain", "final_y", "target_select")]
+    
+    confounder_bart <- as.matrix(confounder_bart)
+    bart_fit <- bartc(response = final_df$final_y, treatment= final_df$final_treat, confounders = confounder_bart, estimand="ate")
+    
+    idx <- final_df$target_select == 1
+    y1_samp <- bart_fit$mu.hat.cf[, , idx]
+    y0_samp <- bart_fit$mu.hat.obs[, , idx]
+    tate_est <- mean(y1_samp - y0_samp)
+    std_bias <- (tate_est - sate) / sd(final_df$final_y)
+    std_biases_bart[i, k] <- std_bias
+  }
+}
+```
+
+```{r}
+## Second Method --- Final propensity score together in a function
+# method == 'linear'/ 'doubly robust
+# ml/method = 'rf' for random forest
+#             'gbm' for gradient boosted tree
+propensity_fit <- function(method='linear', ps_method = 'rf'){
+    
+  # method = 'linear' / 'dr'
+  # ps_method = 'rf' / 'gbm'
+  if (ps_method == 'rf'){
+    ps_fit <- randomForest(target_select ~ . - childid - mathgain0 - mathgain1 - mathkind - mathgain - minority - final_y - final_treat, data = final_df)
+    ps <- predict(ps_fit)
+  } else {
+    gbm.fit <- gbm(target_select ~ sex + ses + yearstea + mathknow + housepov + mathprep + std.mathkind, distribution = 'gaussian', data=final_df, n.trees = 50)
+    ps <- predict(gbm.fit)
+  }
+  iptw_weights <- ps / (1 - ps)
+  iptw_weights[final_df$target_select == 1] = 1.0
+  
+  des <- svydesign(ids=~1, data=final_df, weights = iptw_weights)
+  if (method == 'linear'){
+    #f <- formula(final_y ~ . - schoolid - classid - childid - mathgain0 - mathgain1 - mathkind - mathgain - minority - target_select)
+    iptw_fit <- svyglm(final_y ~ final_treat + sex + ses + yearstea + mathknow + housepov + mathprep + std.mathkind, design=des)
+  }
+  else{
+    f <- formula(final_y ~ (final_treat + sex + ses + yearstea + mathknow + housepov + mathprep + std.mathkind) + (final_treat + sex + ses + yearstea + mathknow + housepov + mathprep + std.mathkind):final_treat)
+    iptw_fit <- svyglm(f, design=des)
+  }
+iptw_fit
+}
+```
+
+```{r}
+#linear-rf
+sim_ps <- function(response_model = "linear", ps_model = "rf")
+{
+  set.seed(42)
+  
+  n_iters <- 2
+  std_biases_ps <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
+  names <- rep(NA, nrow(designs))
+  for (i in 1:nrow(designs)){
+    names[i] <- paste(design_names[i,], collapse="")
+  }
+  colnames(std_biases_ps) <- names
+  
+  for (k in 1:nrow(designs)){
+    des <- designs[k, ]
+    for (i in 1:n_iters){
+      sim.obj <- simulate_data(ignorable=des["ignorable"][1,], interact = des["interact"][1,], pos.alignment = des["pos.alignment"][1,])  
+      experiment <- sim.obj[["exp"]]
+      target <- sim.obj[["tgt"]]
+      
+      # final modification
+      experiment$target_select <- 0
+      target$target_select <- 1
+      experiment$final_y <- experiment$mathgain
+      target$final_y <- target$mathgain0
+      experiment$final_treat <- experiment$minority
+      target$final_treat <- 0
+      # combining both target and experiment data
+      final_df <- rbind(experiment, target)
+      
+      # compute SATE
+      sate <- mean(final_df$mathgain1 - final_df$mathgain0)
+      
+      # fit model
+      fit <- propensity_fit(method=response_model, ps_method=ps_model)
+      if (response_model == "linear"){
+        tate_est <- coef(fit)["final_treat"]
+      } else {
+        target1 <- data.frame(target)
+        target1$final_treat <- 1
+        idx = final_df$target_select == 1
+        y0 <- fit$fitted.values[idx]
+        y1 <- predict(fit, data=target1)[idx]
+        tate_est <- mean(y1 - y0)
+      }
+      
+      std_bias <- (tate_est - sate) / sd(final_df$final_y)
+      std_biases_ps[i, k] <- std_bias
+    }
+  }
+  std_biases_ps
 }
 ```
 
