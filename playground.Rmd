@@ -195,12 +195,12 @@ design_names <- expand.grid(ignorable=c("T", "F"), interact=c("T", "F"), pos.ali
 # linear regression
 set.seed(42)
 n_iters <- 1000
-std_biases <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
+std_biases_lin <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
 names <- rep(NA, nrow(designs))
 for (i in 1:nrow(designs)){
   names[i] <- paste(design_names[i,], collapse="")
 }
-colnames(std_biases) <- names
+colnames(std_biases_lin) <- names
 
 for (k in 1:nrow(designs)){
   des <- designs[k, ]
@@ -227,21 +227,15 @@ for (k in 1:nrow(designs)){
     
     tate_est <- coef(fit)["final_treat"]
     std_bias <- (tate_est - sate) / sd(final_df$final_y)
-    std_biases[i, k] <- std_bias
+    std_biases_lin[i, k] <- std_bias
   }
 }
-```
-
-```{r}
-
-ggplot(melt(std_biases), aes(y=variable, x=value)) + 
-    geom_boxplot()
 ```
 
 
 ```{r}
 set.seed(42)
-n_iters <- 2
+n_iters <- 1000
 std_biases_bart <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
 names <- rep(NA, nrow(designs))
 for (i in 1:nrow(designs)){
@@ -323,7 +317,7 @@ sim_ps <- function(response_model = "linear", ps_model = "rf")
 {
   set.seed(42)
   
-  n_iters <- 2
+  n_iters <- 1000
   std_biases_ps <- data.frame(matrix(NA, nrow = n_iters, ncol = nrow(designs)))
   names <- rep(NA, nrow(designs))
   for (i in 1:nrow(designs)){
@@ -372,3 +366,13 @@ sim_ps <- function(response_model = "linear", ps_model = "rf")
 }
 ```
 
+
+```{r}
+std_biases_lr_rf <- sim_ps(response_model = "linear", ps_model = "rf")
+```
+
+```{r}
+std_biases_lr_gbm <- sim_ps(response_model = "linear", ps_model = "gbm")
+std_biases_dr_rf <- sim_ps(response_model = "dr", ps_model = "rf")
+std_biases_dr_gbm <- sim_ps(response_model = "dr", ps_model = "gbm")
+```
